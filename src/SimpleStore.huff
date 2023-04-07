@@ -1,40 +1,175 @@
-/* Interface */
-#define function setValue(uint256) nonpayable returns ()
-#define function getValue() view returns (uint256)
+/// @title Arbitrage
+/// @notice SPDX-License-Identifier: MIT
+/// @author marshabl <https://github.com/marshabl>
+/// @notice Modern, heavily-optimized generalized arbitrage contract.
+/// @notice Adapted from libevm/subway (https://github.com/libevm/subway/blob/master/contracts/src/Sandwich.sol)
 
-/* Storage Slots */
-#define constant VALUE_LOCATION = FREE_STORAGE_POINTER()
+// Functions this contract will call
+// NOTE: __FUNC_SIG builtin calls generate the function selector bytes4 at *compile time*
+#define function transfer(address, uint256) nonpayable returns ()
+#define function swap(uint256, uint256, address, bytes) nonpayable returns ()
 
-/* Methods */
-#define macro SET_VALUE() = takes (0) returns (0) {
-    0x04 calldataload   // [value]
-    [VALUE_LOCATION]    // [ptr, value]
-    sstore              // []
+// The allowed user
+// This will be overriden with the constructor flag
+// The constructor logic will need to be copied within deploy scripts
+// in order to inline the correct constants
+#define constant USER = //<YOUR EOA>
+#define constant SLOT = 0x100
+#define constant NUMSWAPS = 0xe0
+#define constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+
+/// @notice Empty Constructor
+/// @notice This is purposefully defined to prevent imports with constructor overrides
+#define macro CONSTRUCTOR() = {}
+
+/// @notice Revert, but still (3, 3) wgmi I guess
+#define macro WAGMI() = takes (0) returns (0) {
+    0x03 dup1 revert
 }
 
-#define macro GET_VALUE() = takes (0) returns (0) {
-    // Load value from storage.
-    [VALUE_LOCATION]   // [ptr]
-    sload                // [value]
+/// @notice Withdraws eth from this contract to the caller
+#define macro RECOVER_ETH() = takes (0) returns (0) {
+    // Get the balance of this contract
+    0x00                                    // [retSize]
+    dup1                                    // [retOffset, retSize]
+    dup1                                    // [argSize, retOffset, retSize]
+    dup1                                    // [argOffset, argSize, retOffset, retSize]
+    selfbalance                             // [balance, argOffset, argSize, retOffset, retSize]
+    caller                                  // [caller, balance, argOffset, argSize, retOffset, retSize]
+    gas                          // [(gas - 5000), caller, balance, argOffset, argSize, retOffset, retSize]
+    call                                    // [success]
 
-    // Store value in memory.
-    0x00 mstore
-
-    // Return value
-    0x20 0x00 return
+    // Validate call success
+    iszero error jumpi stop
 }
 
+/// @notice Executes an ERC20 transfer
+#define macro TRANSFER_() = takes (0) returns (0) {
+    __FUNC_SIG(transfer) 0xe0 shl 0x00 mstore  // [amountIn, pair, token]
+
+    // store args in memory
+    // address, uint256
+    0x24 mstore                 // [pair, token]
+    dup1 0x04 mstore            // [pair, token]
+    
+    0x00                        // [ret_size, token]
+    0x00                        // [ret_offset, ret_size, token]
+    0x44                        // [args_size, ret_offset, ret_size, token]
+    0x00                        // [args_offset, args_size, ret_offset, ret_size, token]
+    0x00                        // [value, args_offset, args_size, ret_offset, ret_size, token]
+    dup7                        // [to, value, args_offset, args_size, ret_offset, ret_size, token]
+    gas                         // [gas, to, value, args_offset, args_size, ret_offset, ret_size, token]
+    call                        // [token]
+
+    // Validate call success
+    iszero error jumpi          // [token]
+}
+
+/// @notice Executes a uniswapV2 style swap
+#define macro SWAP_CALLDATA_NORMAL() = takes (0) returns (0) {
+    [SLOT] mload                            // [slot, pair]
+    dup1 calldataload 0x60 shr              
+    swap1 0x14 add                          // [slot, next, pair]
+    dup1 calldataload 0x90 shr              
+    swap1 0x0e add                          // [slot, amountOut, next, pair]
+    dup1 calldataload 0xf8 shr              
+    swap1 0x01 add                          // [slot , dir, amountOut, next, pair]
+    [SLOT] mstore                           
+}
+
+/// @notice Executes a uniswapV2 style swap
+#define macro SWAP_CALLDATA_LAST() = takes (0) returns (0) {
+    address
+    [SLOT] mload                            // [slot, address, pair]
+    dup1 calldataload 0x90 shr              
+    swap1 0x0e add                          // [slot, amountOut, address, pair]
+    dup1 calldataload 0xf8 shr              
+    swap1 0x01 add                          // [slot , dir, amountOut, address, pair]
+    [SLOT] mstore                           
+}
+
+
+/// @notice Executes a uniswapV2 style swap
+#define macro SWAP_() = takes (0) returns (0) {
+    __FUNC_SIG(swap) 0xe0 shl 0x00 mstore   // [dir, amountOut, next, pair]
+
+    iszero _Zero_Token_out jumpi            
+        0x00 0x04 mstore                    
+        0x24 mstore                         
+        __Continue_Swap_Call jump          
+    _Zero_Token_out:
+        0x04 mstore                         
+        0x00 0x24 mstore                    
+
+    __Continue_Swap_Call:
+
+    dup1 0x44 mstore        // [next, pair]      
+    0x84 0x64 mstore        // [next, pair]      
+
+    // Execute the call
+    0x00                    // [retSize, pair]
+    0x00                    // [retOffset, retSize, pair]
+    0xc4                    // [argSize, retOffset, retSize, pair]
+    0x00                    // [argOffset, argSize, retOffset, retSize, pair]
+    0x00                    // [value, argOffset, argSize, retOffset, retSize, pair]
+    dup7                    // [to, value, argOffset, argSize, retOffset, retSize, pair]
+    gas                     // [gas, to, value, argOffset, argSize, retOffset, retSize, pair]
+    call                    // [success, pair]
+
+    // Validate call success
+    iszero error jumpi      // [pair]
+}
+
+
+/// @notice Executes an arbitrage transaction
+#define macro EXECUTE_ARB() = takes (0) returns (0) {
+    0x00 calldataload 0xf8 shr iszero arb jump        // []
+
+    RECOVER_ETH()
+
+    arb:
+    0x01 calldataload 0xf8 shr [NUMSWAPS] mstore  // []
+
+    //transfer
+    [WETH]                                  // [token] - bytes 20
+    0x10 calldataload 0x60 shr              // [pair, token] - bytes 20
+    0x02 calldataload 0x90 shr              // [amountIn, pair token] - uint128
+    TRANSFER_() 
+
+    0x24 [SLOT] mstore                      // []
+
+    loop:
+        0x01 [NUMSWAPS] mload sub
+        dup1 [NUMSWAPS] mstore
+        iszero lastSwap jumpi
+        
+
+        //swaps
+        SWAP_CALLDATA_NORMAL()
+        SWAP_()                             // [pair]
+        loop jump
+
+        lastSwap:
+            SWAP_CALLDATA_LAST()
+            SWAP_()
+            end jump
+
+    end:
+        stop
+}
+
+/// @notice The main dispatch fallback
 #define macro MAIN() = takes (0) returns (0) {
-    // Identify which function is being called.
-    0x00 calldataload 0xE0 shr
-    dup1 __FUNC_SIG(setValue) eq set jumpi
-    dup1 __FUNC_SIG(getValue) eq get jumpi
+    // If the call has no data, receive()
+    calldatasize iszero rcv jumpi                           // [selector]
 
-    0x00 0x00 revert
+    // Verify that the caller is the USER
+    caller [USER] eq iszero error jumpi                     // [selector]
 
-    set:
-        SET_VALUE()
-    get:
-        GET_VALUE()
+    EXECUTE_ARB()                                           // _stops_
 
+    error: WAGMI()                                          // _reverts_
+
+    // Allows the contract to receive ether
+    rcv: callvalue iszero error jumpi stop                  // _stops_
 }
